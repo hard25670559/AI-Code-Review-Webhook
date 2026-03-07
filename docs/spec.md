@@ -273,6 +273,7 @@ class BaseReviewer(ABC):
 |------|------|---------|
 | `AnthropicReviewer` | `app/providers/anthropic.py` | Anthropic Claude |
 | `OpenAIReviewer` | `app/providers/openai.py` | OpenAI GPT |
+| `ClaudeCliReviewer` | `app/providers/claude_cli.py` | Claude CLI（本機） |
 
 每個實作類別負責：
 - 初始化對應的 SDK client
@@ -289,7 +290,7 @@ def run_review(ctx: MRContext) -> str: ...  # 委派給 get_reviewer()
 
 | 變數名稱 | 說明 | 可選值 | 預設值 |
 |----------|------|--------|--------|
-| `AI_PROVIDER` | 使用的 AI 廠商 | `anthropic`、`openai` | `anthropic` |
+| `AI_PROVIDER` | 使用的 AI 廠商 | `anthropic`、`openai`、`claude_cli` | `anthropic` |
 | `AI_MODEL` | 使用的模型名稱 | 各廠商模型 ID | `claude-sonnet-4-6` |
 | `ANTHROPIC_API_KEY` | Anthropic API Key | - | （選填，依 provider） |
 | `OPENAI_API_KEY` | OpenAI API Key | - | （選填，依 provider） |
@@ -387,6 +388,115 @@ app/
 - [ ] `app/providers/openai.py`：新增兩個工具的 Schema（OpenAI 格式）
 - [ ] `ai_review.py` 或 `task_manager.py`：新增判斷邏輯，依有無舊 review 決定 prompt 模式
 - [ ] 差異模式 prompt：告知 AI 這是針對新增差異的補充 review，提供 last SHA 與 current SHA
+
+---
+
+## 功能 4.7：Claude CLI Provider
+
+### 需求描述
+- 新增第三個 AI Provider，使用本機安裝的 `claude` CLI（Claude Code）執行 review
+- 透過 Redis 儲存 `session_id`，同一 MR 的多次 review 共用同一個 Claude 對話 session，保持跨次呼叫的上下文一致性
+- MR merge 時清除 session_id，避免殘留舊 session
+
+### 技術規格
+
+#### ClaudeCliReviewer（`app/providers/claude_cli.py`）
+
+呼叫方式：
+```bash
+claude -p "<prompt>" \
+  --output-format json \
+  --mcp-config '<mcp_config_json>' \
+  --dangerously-skip-permissions \
+  [--resume <session_id>]
+```
+
+- **Prompt**：與 Anthropic/OpenAI provider 相同邏輯（MR 基本資訊 + 變動檔案列表），AI 自行決定呼叫哪些工具
+- **工具**：透過 MCP server 提供（stdio 模式），工具集與現有 provider 相同
+- **Session 延續**：若 Redis 有此 MR 的 `session_id`，加上 `--resume <session_id>` 參數
+- **輸出解析**：解析 JSON stdout，`result` 欄位為 review 文字，`session_id` 欄位存回 Redis
+- **實作位置**：`ctx.cli_session_id` 欄位（MRContext 新增）用於傳遞 session_id 進出 reviewer
+
+#### MCP Server（`app/mcp_server.py`）
+
+- 使用 `fastmcp` 建立 stdio MCP server
+- 暴露以下工具（與現有 `tools.py` 共用實作）：
+  - `get_file_diff`、`get_file_content`、`list_directory`、`search_in_repo`
+  - `get_issue`、`get_issue_notes`
+  - `get_diff_between_shas`、`get_previous_review`
+- MRContext 資訊（`project_id`、`mr_iid`、`sha`、`target_branch`、`source_branch`）透過環境變數傳入
+- 由 Claude CLI 在需要工具時自動 spawn（stdio transport），每次 review 結束後自動結束
+
+MCP config 結構（傳給 `--mcp-config`）：
+```json
+{
+  "mcpServers": {
+    "ai-review": {
+      "command": "python",
+      "args": ["-m", "app.mcp_server"],
+      "env": {
+        "MR_PROJECT_ID": "123",
+        "MR_IID": "45",
+        "MR_SHA": "abc1234...",
+        "MR_TARGET_BRANCH": "main",
+        "MR_SOURCE_BRANCH": "feature/xxx",
+        "MR_LAST_REVIEWED_SHA": ""
+      }
+    }
+  }
+}
+```
+
+#### Session 管理
+
+| 項目 | 說明 |
+|------|------|
+| Redis Key | `ai_review:session:{project_id}:{mr_iid}` |
+| Value | Claude CLI 回傳的 `session_id`（UUID 字串） |
+| TTL | 永不過期 |
+| 寫入時機 | 每次 review 完成後，從 `ctx.cli_session_id` 存入 Redis |
+| 讀取時機 | 每次 review 開始前，從 Redis 取出填入 `ctx.cli_session_id` |
+| 清除時機 | MR merge 事件觸發時 |
+
+#### MR Merge 處理
+
+- webhook 收到 `action == "merge"` 事件時：
+  1. 刪除 Redis 中的 `ai_review:session:{project_id}:{mr_iid}`
+  2. 不觸發 review，直接回應 `{"status": "ok"}`
+- webhook.py 的 `_ALLOWED_ACTIONS` 不包含 `merge`，需另外處理
+
+### 環境變數
+
+| 變數名稱 | 說明 |
+|----------|------|
+| `AI_PROVIDER=claude_cli` | 指定使用 Claude CLI provider |
+| `ANTHROPIC_API_KEY` | Claude CLI 認證使用（與 Anthropic provider 共用） |
+
+### 容器化
+
+- `Dockerfile` 新增 Node.js 安裝與 `npm install -g @anthropic-ai/claude-code`
+- `requirements.txt` 新增 `fastmcp`
+
+### 檔案結構異動
+
+```
+app/
+├── providers/
+│   └── claude_cli.py     # ClaudeCliReviewer
+└── mcp_server.py          # FastMCP stdio server（暴露工具給 Claude CLI）
+```
+
+### 實作細項
+- [ ] `app/mr_info.py`：`MRContext` 新增 `cli_session_id: str | None = None` 欄位
+- [ ] `app/redis_client.py`：新增 `get_session_id`、`set_session_id`、`delete_session_id` 函式
+- [ ] `app/mcp_server.py`：建立 FastMCP stdio server，透過環境變數接收 MRContext，暴露所有工具
+- [ ] `app/providers/claude_cli.py`：`ClaudeCliReviewer` 實作（含 MCP config 組裝、subprocess 呼叫、JSON 解析、session_id 更新）
+- [ ] `app/ai_review.py`：factory 新增 `claude_cli` case
+- [ ] `app/task_manager.py`：review 前讀取 `session_id` 填入 ctx；review 後將 `ctx.cli_session_id` 存回 Redis（僅 `claude_cli` provider）
+- [ ] `app/webhook.py`：新增 `action == "merge"` 處理，清除 `cli_session_id`
+- [ ] `Dockerfile`：安裝 Node.js + `npm install -g @anthropic-ai/claude-code`
+- [ ] `requirements.txt`：新增 `fastmcp`
+- [ ] `.env.example`：新增 `AI_PROVIDER=claude_cli` 範例說明
 
 ---
 
@@ -507,3 +617,4 @@ app/
 | 2026-03-07 | 功能 4 新增 `get_issue_notes` 工具，允許 Claude 查看 Issue 留言補充需求細節 |
 | 2026-03-07 | 功能 3 初始 prompt 新增 MR 基本資訊（標題、描述、作者）；資訊來源為 webhook payload，不需額外 API 呼叫 |
 | 2026-03-07 | 新增功能 4.6：差異化 MR Review；新增 get_diff_between_shas、get_previous_review 工具；舊 review 留言識別機制；邊界情況處理 |
+| 2026-03-08 | 新增功能 4.7：Claude CLI Provider；MCP server 暴露工具；Redis session_id 管理；MR merge 清除 session；Dockerfile 新增 Node.js + Claude CLI |

@@ -563,6 +563,287 @@ elif tool_name == "get_previous_review":
 
 ---
 
+### Step 12：Claude CLI Provider（功能 4.7）
+
+> 在 Step 0–11 完成的基礎上進行，屬於新功能擴充。
+
+---
+
+#### Step 12-1：`app/mr_info.py` — MRContext 新增 `cli_session_id` 欄位
+
+在 `MRContext` dataclass 中新增選填欄位：
+
+```python
+@dataclass
+class MRContext:
+    # ... 現有欄位 ...
+    last_reviewed_sha: str | None = None
+    cli_session_id: str | None = None   # 新增：Claude CLI session，由 task_manager 填入/讀取
+```
+
+此欄位用途：
+- `task_manager.py` 在 review 前從 Redis 讀取 session_id 填入
+- `ClaudeCliReviewer.run_review()` 執行後將新的 session_id 寫回此欄位
+- `task_manager.py` 在 review 後從此欄位取出並存回 Redis
+
+---
+
+#### Step 12-2：`app/redis_client.py` — 新增 session_id 操作
+
+新增三個函式，Key 格式為 `ai_review:session:{project_id}:{mr_iid}`：
+
+```python
+async def get_session_id(project_id: int, mr_iid: int) -> str | None:
+    r = await get_redis()
+    return await r.get(f"ai_review:session:{project_id}:{mr_iid}")
+
+async def set_session_id(project_id: int, mr_iid: int, session_id: str) -> None:
+    r = await get_redis()
+    await r.set(f"ai_review:session:{project_id}:{mr_iid}", session_id)
+    # 無 TTL，永不過期
+
+async def delete_session_id(project_id: int, mr_iid: int) -> None:
+    r = await get_redis()
+    await r.delete(f"ai_review:session:{project_id}:{mr_iid}")
+```
+
+---
+
+#### Step 12-3：`app/mcp_server.py` — FastMCP stdio server
+
+建立新檔案 `app/mcp_server.py`，作為 Claude CLI 的工具橋接層。
+
+**Context 讀取（從環境變數）：**
+```python
+import os
+from mcp.server.fastmcp import FastMCP
+from app import tools, config
+from app.mr_info import MRContext
+
+mcp = FastMCP("ai-review")
+
+# 從環境變數讀取 MRContext 資訊（由 ClaudeCliReviewer 啟動時傳入）
+_project_id    = int(os.environ["MR_PROJECT_ID"])
+_mr_iid        = int(os.environ["MR_IID"])
+_sha           = os.environ["MR_SHA"]
+_target_branch = os.environ["MR_TARGET_BRANCH"]
+_source_branch = os.environ["MR_SOURCE_BRANCH"]
+_last_sha      = os.environ.get("MR_LAST_REVIEWED_SHA") or None
+```
+
+**工具定義（對應 `tools.py` 的所有函式）：**
+```python
+@mcp.tool()
+def get_file_diff(file_path: str) -> str:
+    return tools.get_file_diff(_project_id, file_path, _target_branch, _source_branch)
+
+@mcp.tool()
+def get_file_content(file_path: str) -> str:
+    return tools.get_file_content(_project_id, file_path)
+
+@mcp.tool()
+def list_directory(path: str) -> str:
+    return tools.list_directory(_project_id, path)
+
+@mcp.tool()
+def search_in_repo(keyword: str) -> str:
+    return tools.search_in_repo(_project_id, keyword)
+
+@mcp.tool()
+def get_issue(issue_iid: int) -> str:
+    return tools.get_issue(_project_id, issue_iid)
+
+@mcp.tool()
+def get_issue_notes(issue_iid: int) -> str:
+    return tools.get_issue_notes(_project_id, issue_iid)
+
+@mcp.tool()
+def get_diff_between_shas(from_sha: str, to_sha: str) -> str:
+    # 需建立臨時 ctx 傳入
+    ctx = _make_ctx()
+    return tools.get_diff_between_shas(ctx, from_sha, to_sha)
+
+@mcp.tool()
+def get_previous_review() -> str:
+    ctx = _make_ctx()
+    return tools.get_previous_review(ctx)
+```
+
+**啟動（stdio transport）：**
+```python
+if __name__ == "__main__":
+    mcp.run(transport="stdio")
+```
+
+---
+
+#### Step 12-4：`app/providers/claude_cli.py` — ClaudeCliReviewer
+
+建立新檔案，繼承 `BaseReviewer`。
+
+**Prompt 建構（`_build_initial_prompt`）：**
+與 `app/providers/anthropic.py` 的 `_build_initial_prompt` 邏輯完全相同（依 `ctx.last_reviewed_sha` 切換完整/差異模式），直接複用或共用。
+
+**MCP config 組裝：**
+```python
+def _build_mcp_config(ctx: MRContext) -> str:
+    import json
+    return json.dumps({
+        "mcpServers": {
+            "ai-review": {
+                "command": "python",
+                "args": ["-m", "app.mcp_server"],
+                "env": {
+                    "MR_PROJECT_ID": str(ctx.project_id),
+                    "MR_IID": str(ctx.mr_iid),
+                    "MR_SHA": ctx.sha,
+                    "MR_TARGET_BRANCH": ctx.target_branch,
+                    "MR_SOURCE_BRANCH": ctx.source_branch,
+                    "MR_LAST_REVIEWED_SHA": ctx.last_reviewed_sha or "",
+                },
+            }
+        }
+    })
+```
+
+**`run_review(ctx)` 實作：**
+```python
+def run_review(self, ctx: MRContext) -> str:
+    prompt = _build_initial_prompt(ctx)
+    mcp_config = _build_mcp_config(ctx)
+
+    cmd = [
+        "claude", "-p", prompt,
+        "--output-format", "json",
+        "--mcp-config", mcp_config,
+        "--dangerously-skip-permissions",
+    ]
+    if ctx.cli_session_id:
+        cmd += ["--resume", ctx.cli_session_id]
+
+    result = subprocess.run(cmd, capture_output=True, text=True)
+
+    if result.returncode != 0:
+        logger.error("[claude_cli] CLI error: %s", result.stderr)
+        return f"Claude CLI 執行失敗：{result.stderr}"
+
+    data = json.loads(result.stdout)
+    ctx.cli_session_id = data.get("session_id")   # 寫回 ctx，供 task_manager 存 Redis
+    return data.get("result", "")
+```
+
+---
+
+#### Step 12-5：`app/ai_review.py` — factory 新增 claude_cli case
+
+```python
+from app.providers.claude_cli import ClaudeCliReviewer
+
+def get_reviewer() -> BaseReviewer:
+    if config.AI_PROVIDER == "openai":
+        return OpenAIReviewer(config.OPENAI_API_KEY, config.AI_MODEL)
+    if config.AI_PROVIDER == "claude_cli":
+        return ClaudeCliReviewer()
+    return AnthropicReviewer(config.ANTHROPIC_API_KEY, config.AI_MODEL)
+```
+
+注意：`ClaudeCliReviewer` 不需要 API key 參數（由 claude CLI 自行讀取環境變數 `ANTHROPIC_API_KEY`）。
+
+---
+
+#### Step 12-6：`app/task_manager.py` — session_id 讀取與寫入
+
+在 `_review_task(ctx)` 中新增 session_id 的讀寫邏輯：
+
+**review 前（讀取 session_id）：**
+```python
+# 在差異 review 判斷之後、ai_review.run_review() 之前
+if config.AI_PROVIDER == "claude_cli":
+    ctx.cli_session_id = await redis_client.get_session_id(ctx.project_id, ctx.mr_iid)
+    if ctx.cli_session_id:
+        logger.info("Resuming CLI session %s for MR %s/%s",
+                    ctx.cli_session_id[:8], ctx.project_id, ctx.mr_iid)
+```
+
+**review 後（寫入 session_id）：**
+```python
+# 在 post_mr_comment 之後、set_processed_sha 之前
+if config.AI_PROVIDER == "claude_cli" and ctx.cli_session_id:
+    await redis_client.set_session_id(ctx.project_id, ctx.mr_iid, ctx.cli_session_id)
+```
+
+同時調整 API key 檢查邏輯（`claude_cli` 使用 `ANTHROPIC_API_KEY`）：
+
+> ⚠️ **邊界情況**：現有邏輯是 `ANTHROPIC_API_KEY if anthropic else OPENAI_API_KEY`，若 `AI_PROVIDER=claude_cli` 會錯誤走入 else，抓到空的 `OPENAI_API_KEY`，導致誤判「key 未設定」並 sleep 10 秒 + 發留言。必須修正為：
+
+```python
+if config.AI_PROVIDER == "openai":
+    api_key = config.OPENAI_API_KEY
+else:
+    # anthropic 和 claude_cli 都使用 ANTHROPIC_API_KEY
+    api_key = config.ANTHROPIC_API_KEY
+```
+
+---
+
+#### Step 12-7：`app/webhook.py` — MR merge 清除 session
+
+在 `handle_webhook` 中新增 merge action 的處理（在現有 action 過濾之前）：
+
+```python
+if action == "merge":
+    project_id = payload["project"]["id"]
+    mr_iid = payload["object_attributes"]["iid"]
+    await redis_client.delete_session_id(project_id, mr_iid)
+    logger.info("Cleared CLI session for merged MR %s/%s", project_id, mr_iid)
+    return {"status": "ok", "reason": "session cleared on merge"}
+```
+
+注意：merge 不觸發 review，只做 session 清除，因此放在 `_ALLOWED_ACTIONS` 判斷之前處理。
+
+---
+
+#### Step 12-8：`Dockerfile` — 安裝 Node.js 與 Claude CLI
+
+在現有 Python 安裝之後新增：
+
+```dockerfile
+# 安裝 Node.js（Claude CLI 依賴）
+RUN apt-get update && apt-get install -y nodejs npm && rm -rf /var/lib/apt/lists/*
+
+# 安裝 Claude CLI
+RUN npm install -g @anthropic-ai/claude-code
+```
+
+---
+
+#### Step 12-9：`requirements.txt` — 新增 fastmcp
+
+```
+fastapi
+uvicorn[standard]
+redis[asyncio]
+anthropic
+openai
+requests
+python-dotenv
+fastmcp          ← 新增
+```
+
+---
+
+#### Step 12-10：`.env.example` — 新增 claude_cli 說明
+
+新增：
+```
+# AI Provider 設定（可選值：anthropic / openai / claude_cli）
+AI_PROVIDER=anthropic
+
+# claude_cli provider 使用 ANTHROPIC_API_KEY，不需另外設定
+```
+
+---
+
 ## 實作順序總結
 
 | 順序 | 檔案 | 對應功能 |
@@ -579,3 +860,4 @@ elif tool_name == "get_previous_review":
 | 10 | `webhook.py` + `main.py` | 功能 1 |
 | Step 0 | `app/providers/`、`ai_review.py`、`config.py`、`task_manager.py` | 功能 4.5 |
 | Step 11 | `gitlab_client.py`、`mr_info.py`、`tools.py`、`task_manager.py`、`providers/*.py` | 功能 4.6 |
+| Step 12 | `mr_info.py`、`redis_client.py`、`mcp_server.py`、`providers/claude_cli.py`、`ai_review.py`、`task_manager.py`、`webhook.py`、`Dockerfile`、`requirements.txt` | 功能 4.7 |
