@@ -17,4 +17,6 @@ RUN mkdir -p /data/repos && chown appuser:appuser /data/repos
 
 USER appuser
 
+RUN git config --global --add safe.directory '*'
+
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

@@ -863,6 +863,23 @@ volumes:
 
 ---
 
+#### Step 12-12：`Dockerfile` — 設定 git safe.directory
+
+在 `USER appuser` 之後新增：
+
+```dockerfile
+USER appuser
+
+RUN git config --global --add safe.directory '*'  # 新增
+```
+
+說明：
+- git 基於安全考量，當目錄 owner 與執行者不符時（如 volume-mounted repo 由 root 建立，但以 appuser 執行），會拒絕操作並回傳 "detected dubious ownership" 錯誤
+- 設定 `safe.directory '*'` 允許 appuser 操作任何目錄，解除此限制
+- 必須在 `USER appuser` 之後執行，確保寫入 appuser 的 `~/.gitconfig`（`/home/appuser/.gitconfig`）
+
+---
+
 #### Step 12-9：`requirements.txt` — 新增 fastmcp
 
 ```

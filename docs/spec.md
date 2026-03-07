@@ -504,6 +504,7 @@ app/
 - [ ] `app/webhook.py`：新增 `action == "merge"` 處理，清除 `cli_session_id`
 - [ ] `Dockerfile`：安裝 Node.js + `npm install -g @anthropic-ai/claude-code`
 - [ ] `Dockerfile`：建立非 root 使用者 `appuser`（UID 1000），設定 `/data/repos` owner，`USER appuser`
+- [ ] `Dockerfile`：以 `appuser` 身份設定 `git config --global --add safe.directory '*'`，解決 volume-mounted repo 的 "dubious ownership" 錯誤（git 安全限制：目錄 owner 與執行者不符時拒絕操作）
 - [ ] `docker-compose.yml`：新增 `claude_data` volume，掛載到 `/home/appuser/.claude`
 - [ ] `requirements.txt`：新增 `fastmcp`
 - [ ] `.env.example`：新增 `AI_PROVIDER=claude_cli` 範例說明
