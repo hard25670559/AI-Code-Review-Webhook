@@ -476,6 +476,14 @@ MCP config 結構（傳給 `--mcp-config`）：
 
 - `Dockerfile` 新增 Node.js 安裝與 `npm install -g @anthropic-ai/claude-code`
 - `requirements.txt` 新增 `fastmcp`
+- `Dockerfile` 建立非 root 使用者 `appuser`（UID 1000）：
+  - `--dangerously-skip-permissions` 基於安全考量禁止在 root 下執行，必須以非 root 身份執行 Claude CLI
+  - 建立 `/data/repos` 目錄並設定 owner 為 `appuser`（確保 volume 掛載後有寫入權限）
+  - 最後以 `USER appuser` 切換，uvicorn 和 Claude CLI 均以此身份執行
+- `docker-compose.yml` 新增 `claude_data` volume，掛載到 `/home/appuser/.claude`：
+  - 持久化 Claude CLI 的 session 與設定（`claude login` 認證結果）
+  - 允許使用 Claude.ai 訂閱方案（`claude login`）取代 API key 計費
+  - 登入方式：`docker exec -it <container> claude login`
 
 ### 檔案結構異動
 
@@ -495,8 +503,54 @@ app/
 - [ ] `app/task_manager.py`：review 前讀取 `session_id` 填入 ctx；review 後將 `ctx.cli_session_id` 存回 Redis（僅 `claude_cli` provider）
 - [ ] `app/webhook.py`：新增 `action == "merge"` 處理，清除 `cli_session_id`
 - [ ] `Dockerfile`：安裝 Node.js + `npm install -g @anthropic-ai/claude-code`
+- [ ] `Dockerfile`：建立非 root 使用者 `appuser`（UID 1000），設定 `/data/repos` owner，`USER appuser`
+- [ ] `docker-compose.yml`：新增 `claude_data` volume，掛載到 `/home/appuser/.claude`
 - [ ] `requirements.txt`：新增 `fastmcp`
 - [ ] `.env.example`：新增 `AI_PROVIDER=claude_cli` 範例說明
+
+---
+
+## 功能 4.8：Health Check — Claude CLI 健康診斷
+
+### 需求描述
+- 擴充 `GET /health` endpoint，測試 Claude CLI 是否可正常運作
+- 發送簡單的 "say hi" prompt，確認 Claude CLI 有正確回應
+- 方便快速診斷 Claude CLI 安裝與 API Key 設定是否正確
+
+### 技術規格
+- 端點：`GET /health`
+- 僅在 `AI_PROVIDER=claude_cli` 時執行 Claude CLI 測試；其他 provider 維持原有行為（只回傳 `{"status": "ok"}`）
+- 執行指令：`claude -p "say hi" --output-format json --dangerously-skip-permissions`
+- 使用 `asyncio.to_thread` 包裝 subprocess 呼叫（避免 blocking async event loop）
+
+### 回傳格式
+
+成功：
+```json
+{
+  "status": "ok",
+  "claude_cli": {
+    "status": "ok",
+    "response": "Hello! ..."
+  }
+}
+```
+
+失敗：
+```json
+{
+  "status": "ok",
+  "claude_cli": {
+    "status": "error",
+    "error": "..."
+  }
+}
+```
+
+### 實作細項
+- [ ] `app/main.py`：擴充 `/health` endpoint，依 `AI_PROVIDER` 決定是否執行 Claude CLI 測試
+- [ ] 以 `asyncio.to_thread` 執行 subprocess（非阻塞）
+- [ ] 解析 JSON 輸出，取 `result` 欄位；解析失敗時回傳原始輸出截斷錯誤訊息
 
 ---
 

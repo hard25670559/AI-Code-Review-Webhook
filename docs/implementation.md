@@ -803,17 +803,63 @@ if action == "merge":
 
 ---
 
-#### Step 12-8：`Dockerfile` — 安裝 Node.js 與 Claude CLI
+#### Step 12-8：`Dockerfile` — 安裝 Node.js、Claude CLI，並建立非 root 使用者
 
-在現有 Python 安裝之後新增：
+完整 Dockerfile（含 non-root 使用者設定）：
 
 ```dockerfile
-# 安裝 Node.js（Claude CLI 依賴）
-RUN apt-get update && apt-get install -y nodejs npm && rm -rf /var/lib/apt/lists/*
+FROM python:3.12-slim
 
-# 安裝 Claude CLI
+RUN apt-get update && apt-get install -y git nodejs npm && rm -rf /var/lib/apt/lists/*
+
 RUN npm install -g @anthropic-ai/claude-code
+
+# 建立非 root 使用者（--dangerously-skip-permissions 禁止在 root 下執行）
+RUN useradd -m -u 1000 appuser
+
+WORKDIR /app
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY app/ ./app/
+
+# 建立 /data/repos 目錄並設定 owner（volume 掛載後 appuser 有寫入權限）
+RUN mkdir -p /data/repos && chown appuser:appuser /data/repos
+
+USER appuser
+
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
 ```
+
+說明：
+- `useradd -m -u 1000 appuser`：建立 home 目錄（`/home/appuser/`），Claude CLI session 存放於此
+- `chown appuser:appuser /data/repos`：需在切換使用者前設定，否則無權限
+- `USER appuser`：之後所有指令（含 CMD）均以 appuser 執行
+
+---
+
+#### Step 12-11：`docker-compose.yml` — 新增 claude_data volume
+
+在 `webhook` 服務的 `volumes` 中新增，並在頂層 `volumes` 宣告：
+
+```yaml
+services:
+  webhook:
+    volumes:
+      - repos:/data/repos
+      - claude_data:/home/appuser/.claude  # 新增：持久化 Claude CLI session
+
+volumes:
+  repos:
+  redis_data:
+  claude_data:  # 新增
+```
+
+說明：
+- `/home/appuser/.claude/` 是 Claude CLI 儲存認證 session 的目錄
+- 使用 named volume（`claude_data`）確保容器重建後 session 不遺失
+- 登入方式：`docker exec -it <container_name> claude login`（登入後 session 持久化）
 
 ---
 
@@ -841,6 +887,53 @@ AI_PROVIDER=anthropic
 
 # claude_cli provider 使用 ANTHROPIC_API_KEY，不需另外設定
 ```
+
+---
+
+### Step 13：擴充 /health endpoint（功能 4.8）
+
+> 在 Step 12 完成的基礎上進行。
+
+---
+
+#### Step 13-1：`app/main.py` — 擴充 `/health` endpoint
+
+修改現有 `/health` endpoint，依 `AI_PROVIDER` 決定是否執行 Claude CLI 健康診斷：
+
+```python
+import asyncio
+import json
+import subprocess
+
+from app import config
+
+@app.get("/health")
+async def health():
+    if config.AI_PROVIDER != "claude_cli":
+        return {"status": "ok"}
+
+    def _check_cli():
+        result = subprocess.run(
+            ["claude", "-p", "say hi", "--output-format", "json",
+             "--dangerously-skip-permissions"],
+            capture_output=True, text=True,
+        )
+        if result.returncode != 0:
+            return {"status": "error", "error": result.stderr[:200]}
+        try:
+            data = json.loads(result.stdout)
+            return {"status": "ok", "response": data.get("result", "")}
+        except json.JSONDecodeError:
+            return {"status": "error", "error": f"Invalid JSON: {result.stdout[:200]}"}
+
+    cli_result = await asyncio.to_thread(_check_cli)
+    return {"status": "ok", "claude_cli": cli_result}
+```
+
+說明：
+- `AI_PROVIDER != "claude_cli"` 時不執行 CLI 測試，維持原行為
+- `asyncio.to_thread` 確保 subprocess 不阻塞 async event loop
+- 解析 JSON `result` 欄位作為回應文字；失敗時回傳截斷的錯誤訊息
 
 ---
 
