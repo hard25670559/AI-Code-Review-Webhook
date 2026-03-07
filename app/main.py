@@ -20,3 +20,8 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="AI Code Review Webhook", lifespan=lifespan)
 app.include_router(webhook_router)
+
+
+@app.get("/health")
+async def health():
+    return {"status": "ok"}
