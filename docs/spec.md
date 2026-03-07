@@ -331,6 +331,65 @@ app/
 
 ---
 
+## 功能 4.6：差異化 MR Review
+
+### 需求描述
+- 若同一個 MR 已有過 AI review，後續新 push 只針對「上次 review 的 SHA → 最新 SHA」之間的差異做 review
+- 節省 token，避免重複 review 已審過的內容
+- 若沒有過 review 記錄，維持現有完整 review 行為
+
+### 判斷邏輯
+
+```
+觸發 review 時：
+  1. 從 Redis 取得 last_reviewed_sha
+     └── 無記錄 → 執行完整 review（現有行為）
+  2. 從 GitLab MR comments 確認是否有 AI review 留言
+     └── 無留言（被刪除）→ 退回完整 review
+  3. 兩者皆有 → 執行差異 review
+```
+
+### 差異 review 流程
+1. 帶入差異模式的 prompt（告知 AI 這是補充 review，提供 last SHA 與 current SHA）
+2. AI 使用 `get_diff_between_shas` 工具取得差異 diff
+3. AI 可選擇性呼叫 `get_previous_review` 工具取得舊 review 內容作為參考
+4. AI 完成後以相同格式留言（`## AI Code Review（{sha[:7]}）`）
+
+### 技術規格
+
+#### 識別 AI review 留言
+- Pattern：留言內容以 `## AI Code Review（` 開頭
+- 來源：GitLab API `GET /api/v4/projects/:id/merge_requests/:mr_iid/notes`
+
+#### 新增工具
+
+##### `get_diff_between_shas`
+- 描述：取得兩個 SHA 之間的 diff，用於查看自上次 review 後新增的變更
+- 參數：`from_sha`（字串）、`to_sha`（字串）
+- 實作：`git diff {from_sha}...{to_sha}`（在 local repo 執行）
+
+##### `get_previous_review`
+- 描述：取得此 MR 上一次 AI review 的留言內容，作為理解新 diff 的背景參考
+- 參數：無
+- 實作：呼叫 GitLab API 取得 MR notes，篩選最新一筆 `## AI Code Review（` 開頭的留言
+- 回傳：最新一筆 AI review 留言全文（限制 3000 字元）
+- 注意：由 AI 自行決定是否呼叫，不強制
+
+### 邊界情況
+- Redis 有 SHA 但 GitLab 找不到 AI review 留言（被刪除）→ 退回完整 review
+- from_sha 與 to_sha 相同（無新差異）→ 不觸發 review（SHA 去重機制已處理）
+
+### 實作細項
+- [ ] `gitlab_client.py`：新增 `get_mr_notes(project_id, mr_iid)` 函式
+- [ ] `tools.py`：新增 `get_diff_between_shas(ctx, from_sha, to_sha)` 工具函式
+- [ ] `tools.py`：新增 `get_previous_review(ctx)` 工具函式
+- [ ] `app/providers/anthropic.py`：新增兩個工具的 Schema（Anthropic 格式）
+- [ ] `app/providers/openai.py`：新增兩個工具的 Schema（OpenAI 格式）
+- [ ] `ai_review.py` 或 `task_manager.py`：新增判斷邏輯，依有無舊 review 決定 prompt 模式
+- [ ] 差異模式 prompt：告知 AI 這是針對新增差異的補充 review，提供 last SHA 與 current SHA
+
+---
+
 ## 功能 5：MR 留言
 
 ### 需求描述
@@ -391,6 +450,7 @@ app/
 | 發佈 MR 留言 | `POST` | `/api/v4/projects/:id/merge_requests/:mr_iid/notes` |
 | 取得 Issue 內容 | `GET` | `/api/v4/projects/:id/issues/:issue_iid` |
 | 取得 Issue 留言 | `GET` | `/api/v4/projects/:id/issues/:issue_iid/notes` |
+| 取得 MR 留言 | `GET` | `/api/v4/projects/:id/merge_requests/:mr_iid/notes` |
 
 **禁止呼叫的操作（程式碼層面不實作）：**
 - 任何 `PUT` / `PATCH` / `DELETE` 端點
@@ -446,3 +506,4 @@ app/
 | 2026-03-07 | 功能 4 新增 `get_issue` 工具，允許 Claude 查看 GitLab Issue 內容作為 code review 判斷標準；更新操作範圍限制 |
 | 2026-03-07 | 功能 4 新增 `get_issue_notes` 工具，允許 Claude 查看 Issue 留言補充需求細節 |
 | 2026-03-07 | 功能 3 初始 prompt 新增 MR 基本資訊（標題、描述、作者）；資訊來源為 webhook payload，不需額外 API 呼叫 |
+| 2026-03-07 | 新增功能 4.6：差異化 MR Review；新增 get_diff_between_shas、get_previous_review 工具；舊 review 留言識別機制；邊界情況處理 |

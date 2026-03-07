@@ -438,6 +438,131 @@ REPO_BASE_PATH=/data/repos
 
 ---
 
+---
+
+### Step 11：差異化 MR Review（功能 4.6）
+
+> 在 Step 0–10 完成的基礎上進行，屬於新功能擴充。
+
+---
+
+#### Step 11-1：`gitlab_client.py` — 新增 `get_mr_notes()`
+
+```python
+def get_mr_notes(project_id: int, mr_iid: int) -> list:
+    # GET /api/v4/projects/:id/merge_requests/:mr_iid/notes
+    # 回傳 MR 所有留言的列表
+```
+
+---
+
+#### Step 11-2：`MRContext` — 新增 `last_reviewed_sha` 欄位
+
+在 `app/mr_info.py` 的 `MRContext` 中新增選填欄位：
+
+```python
+@dataclass
+class MRContext:
+    # ... 現有欄位 ...
+    last_reviewed_sha: str | None = None   # 有過 review 時填入，否則為 None
+```
+
+此欄位由 `task_manager.py` 在判斷差異 review 後填入。
+
+---
+
+#### Step 11-3：`task_manager.py` — 差異 review 判斷邏輯
+
+在 `_review_task(ctx)` 中，於呼叫 `ai_review.run_review()` 前新增判斷：
+
+```
+流程：
+1. 從 Redis 取得 last_reviewed_sha（現有 get_processed_sha）
+2. 若有 last_reviewed_sha：
+   a. 呼叫 gitlab_client.get_mr_notes() 取得 MR 留言列表
+   b. 過濾是否有以「## AI Code Review（」開頭的留言
+   c. 有 → ctx.last_reviewed_sha = last_reviewed_sha（差異模式）
+   d. 無（被刪除）→ 維持 ctx.last_reviewed_sha = None（退回完整 review）
+3. 若無 last_reviewed_sha → ctx.last_reviewed_sha = None（完整 review）
+```
+
+---
+
+#### Step 11-4：`tools.py` — 新增兩個工具函式
+
+**`get_diff_between_shas(ctx: MRContext, from_sha: str, to_sha: str) -> str`**
+- 執行：`git diff {from_sha}...{to_sha}`
+- 於 `{REPO_BASE_PATH}/{ctx.project_id}/` 執行
+- 回傳限制 3000 字元
+
+**`get_previous_review(ctx: MRContext) -> str`**
+- 呼叫 `gitlab_client.get_mr_notes(ctx.project_id, ctx.mr_iid)`
+- 過濾出以 `## AI Code Review（` 開頭的留言
+- 回傳最新一筆（依 `created_at` 排序），限制 3000 字元
+- 若找不到 → 回傳 `（找不到過去的 review 記錄）`
+
+---
+
+#### Step 11-5：各 Provider — 新增工具 Schema 與 dispatch 處理
+
+**`app/providers/anthropic.py`** 的 `_TOOL_SCHEMAS` 新增：
+
+```python
+{
+    "name": "get_diff_between_shas",
+    "description": "取得兩個 commit SHA 之間的 diff，用於查看自上次 review 後新增的變更。",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "from_sha": {"type": "string", "description": "起始 SHA（上次 review 的 SHA）"},
+            "to_sha":   {"type": "string", "description": "結束 SHA（目前最新的 SHA）"},
+        },
+        "required": ["from_sha", "to_sha"],
+    },
+},
+{
+    "name": "get_previous_review",
+    "description": "取得此 MR 上一次 AI review 的留言內容，作為理解新 diff 的背景參考。若覺得對理解新變更有幫助才需呼叫。",
+    "input_schema": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+    },
+},
+```
+
+**`app/providers/openai.py`** 以 OpenAI function calling 格式新增相同兩個工具。
+
+**`app/tools.py`** 的 `dispatch_tool()` 新增對應的 case：
+```python
+elif tool_name == "get_diff_between_shas":
+    return get_diff_between_shas(ctx, tool_input["from_sha"], tool_input["to_sha"])
+elif tool_name == "get_previous_review":
+    return get_previous_review(ctx)
+```
+
+---
+
+#### Step 11-6：各 Provider — 差異模式 Prompt
+
+在 `_build_initial_prompt(ctx)` 中根據 `ctx.last_reviewed_sha` 切換 prompt 結尾：
+
+**完整 review（`last_reviewed_sha is None`）**
+```
+請主動使用工具查看需要的檔案 diff 與相關內容，完成後提供詳細的 code review 建議。
+```
+
+**差異 review（`last_reviewed_sha is not None`）**
+```
+此 MR 先前已有過 AI review（SHA：{last_reviewed_sha[:7]}）。
+本次只需針對 {last_reviewed_sha[:7]} → {sha[:7]} 之間的新增變更進行補充 review。
+請使用 get_diff_between_shas 工具取得差異內容。
+如有需要，可使用 get_previous_review 工具查看上次的 review 結論作為參考。
+完成後提供針對新增變更的 code review 建議。
+```
+
+---
+
 ## 實作順序總結
 
 | 順序 | 檔案 | 對應功能 |
@@ -452,3 +577,5 @@ REPO_BASE_PATH=/data/repos
 | 8 | `ai_review.py` | 功能 4 Agentic Loop |
 | 9 | `task_manager.py` | 功能 1.5 |
 | 10 | `webhook.py` + `main.py` | 功能 1 |
+| Step 0 | `app/providers/`、`ai_review.py`、`config.py`、`task_manager.py` | 功能 4.5 |
+| Step 11 | `gitlab_client.py`、`mr_info.py`、`tools.py`、`task_manager.py`、`providers/*.py` | 功能 4.6 |
