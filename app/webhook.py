@@ -1,4 +1,5 @@
 import logging
+import subprocess
 
 from fastapi import APIRouter, HTTPException, Request, BackgroundTasks
 
@@ -43,5 +44,7 @@ async def _process_mr(payload: dict) -> None:
     try:
         ctx = await build_mr_context(payload)
         task_manager.submit_review_task(ctx)
+    except subprocess.CalledProcessError as e:
+        logger.error("Git command failed: %s\nstderr: %s", " ".join(e.cmd), e.stderr)
     except Exception:
         logger.exception("Failed to process MR payload")

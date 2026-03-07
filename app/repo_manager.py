@@ -20,20 +20,27 @@ def _repo_path(project_id: int) -> str:
 
 def _build_clone_url(repo_url: str) -> str:
     parsed = urlparse(repo_url)
-    return parsed._replace(netloc=f"{config.GITLAB_TOKEN}@{parsed.netloc}").geturl()
+    gitlab_parsed = urlparse(config.GITLAB_URL)
+    return parsed._replace(
+        scheme=gitlab_parsed.scheme,
+        netloc=f"oauth2:{config.GITLAB_TOKEN}@{gitlab_parsed.netloc}",
+    ).geturl()
 
 
 def _run_git(args: list[str], cwd: str | None = None) -> str:
     env = os.environ.copy()
     env["GIT_SSL_NO_VERIFY"] = "1"
     result = subprocess.run(
-        ["git"] + args,
+        ["git", "-c", "http.sslVerify=false", "-c", "credential.helper="] + args,
         cwd=cwd,
         env=env,
         capture_output=True,
         text=True,
-        check=True,
     )
+    if result.returncode != 0:
+        raise subprocess.CalledProcessError(
+            result.returncode, result.args, result.stdout, result.stderr
+        )
     return result.stdout
 
 

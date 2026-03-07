@@ -7,6 +7,8 @@ services:
       - .env
     volumes:
       - repos:/data/repos
+    extra_hosts:
+      - "gitlab-for-webhook:192.168.215.2"
     depends_on:
       - redis
 

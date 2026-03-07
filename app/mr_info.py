@@ -36,7 +36,7 @@ async def build_mr_context(payload: dict) -> MRContext:
 
     raw = await asyncio.to_thread(
         _run_git,
-        ["diff", "--name-only", f"{target_branch}...{source_branch}"],
+        ["diff", "--name-only", f"origin/{target_branch}...origin/{source_branch}"],
         repo_path,
     )
     changed_files = [f for f in raw.strip().splitlines() if f]

@@ -18,7 +18,7 @@ def get_file_diff(project_id: int, file_path: str, target_branch: str, source_br
     repo_path = os.path.join(config.REPO_BASE_PATH, str(project_id))
     try:
         output = _run_git(
-            ["diff", f"{target_branch}...{source_branch}", "--", file_path],
+            ["diff", f"origin/{target_branch}...origin/{source_branch}", "--", file_path],
             cwd=repo_path,
         )
         return _truncate(output) if output else "（無差異）"
