@@ -249,6 +249,88 @@ GitLab MR 留言
 
 ---
 
+## 功能 4.5：AI Provider 切換機制
+
+### 需求描述
+- 支援多個 AI 廠商（Anthropic、OpenAI），可透過環境變數切換
+- 切換廠商或模型不需修改程式碼，只需改 `.env` 重啟
+- 每個 Provider 的 Agentic Loop 實作細節各自封裝，主流程不感知差異
+
+### 技術規格
+
+#### 介面定義（`app/providers/base.py`）
+```python
+from abc import ABC, abstractmethod
+from app.mr_info import MRContext
+
+class BaseReviewer(ABC):
+    @abstractmethod
+    def run_review(self, ctx: MRContext) -> str: ...
+```
+
+#### Provider 實作
+| 類別 | 檔案 | 對應廠商 |
+|------|------|---------|
+| `AnthropicReviewer` | `app/providers/anthropic.py` | Anthropic Claude |
+| `OpenAIReviewer` | `app/providers/openai.py` | OpenAI GPT |
+
+每個實作類別負責：
+- 初始化對應的 SDK client
+- 定義自己格式的 Tool Schemas（Anthropic / OpenAI 格式不同）
+- 實作完整的 Agentic Loop（含工具呼叫與結果回饋）
+
+#### Factory（`app/ai_review.py`）
+```python
+def get_reviewer() -> BaseReviewer: ...  # 依 config.AI_PROVIDER 回傳對應實作
+def run_review(ctx: MRContext) -> str: ...  # 委派給 get_reviewer()
+```
+
+### 環境變數
+
+| 變數名稱 | 說明 | 可選值 | 預設值 |
+|----------|------|--------|--------|
+| `AI_PROVIDER` | 使用的 AI 廠商 | `anthropic`、`openai` | `anthropic` |
+| `AI_MODEL` | 使用的模型名稱 | 各廠商模型 ID | `claude-sonnet-4-6` |
+| `ANTHROPIC_API_KEY` | Anthropic API Key | - | （選填，依 provider） |
+| `OPENAI_API_KEY` | OpenAI API Key | - | （選填，依 provider） |
+
+> 啟動時若 `AI_PROVIDER` 對應的 API Key 未設定，留言提示並等待（現有行為延伸）
+
+### Tool Schema 格式差異
+
+| 欄位 | Anthropic | OpenAI |
+|------|-----------|--------|
+| 頂層結構 | `{name, description, input_schema}` | `{type: "function", function: {name, description, parameters}}` |
+| 參數欄位名稱 | `input_schema` | `parameters` |
+| tool result 格式 | `{type: "tool_result", tool_use_id, content}` | `{role: "tool", tool_call_id, content}` |
+| stop 條件 | `stop_reason == "end_turn"` | `finish_reason == "stop"` |
+| 工具呼叫條件 | `stop_reason == "tool_use"` | `finish_reason == "tool_calls"` |
+
+各 Provider 自行維護自己格式的 Tool Schemas，不共用。
+
+### 檔案結構異動
+
+```
+app/
+├── providers/
+│   ├── __init__.py
+│   ├── base.py          # BaseReviewer 抽象介面
+│   ├── anthropic.py     # AnthropicReviewer（原 ai_review.py 的實作搬移）
+│   └── openai.py        # OpenAIReviewer
+└── ai_review.py         # 僅保留 factory + run_review() 委派
+```
+
+### 實作細項
+- [ ] `app/providers/base.py`：定義 `BaseReviewer` 抽象類別
+- [ ] `app/providers/anthropic.py`：`AnthropicReviewer` 實作（含 Anthropic 格式 Tool Schemas + Agentic Loop）
+- [ ] `app/providers/openai.py`：`OpenAIReviewer` 實作（含 OpenAI 格式 Tool Schemas + Agentic Loop）
+- [ ] `app/ai_review.py`：改為 factory，依 `AI_PROVIDER` 回傳對應 reviewer
+- [ ] `app/config.py`：新增 `AI_PROVIDER`、`AI_MODEL`、`OPENAI_API_KEY`，`ANTHROPIC_API_KEY` 改為 optional
+- [ ] `app/task_manager.py`：API key 檢查依 `AI_PROVIDER` 決定檢查哪個 key
+- [ ] `requirements.txt`：新增 `openai`
+
+---
+
 ## 功能 5：MR 留言
 
 ### 需求描述

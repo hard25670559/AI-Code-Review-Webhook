@@ -47,6 +47,193 @@ ai-review-webhook/
 
 ## 實作步驟
 
+### Step 0：AI Provider 切換機制（功能 4.5）
+
+> 此步驟為既有程式碼的重構，需在 Step 1–10 完成的基礎上進行。
+
+---
+
+#### Step 0-1：建立 providers 目錄結構
+
+新增以下檔案：
+```
+app/providers/
+├── __init__.py      # 空檔案
+├── base.py          # BaseReviewer 抽象介面
+├── anthropic.py     # AnthropicReviewer 實作
+└── openai.py        # OpenAIReviewer 實作
+```
+
+---
+
+#### Step 0-2：`app/providers/base.py` — 抽象介面
+
+```python
+from abc import ABC, abstractmethod
+from app.mr_info import MRContext
+
+class BaseReviewer(ABC):
+    @abstractmethod
+    def run_review(self, ctx: MRContext) -> str: ...
+```
+
+職責：定義所有 Provider 必須實作的介面，確保 `run_review()` 簽名一致。
+
+---
+
+#### Step 0-3：`app/providers/anthropic.py` — AnthropicReviewer
+
+將現有 `ai_review.py` 的實作搬移至此，包含：
+
+- `_TOOL_SCHEMAS`：Anthropic 格式的工具定義（`input_schema` 欄位）
+- `_build_initial_prompt(ctx)`：組合初始 prompt（與現有相同）
+- `_dispatch_tool(ctx, tool_name, tool_input)`：工具 dispatch（與現有相同）
+- `AnthropicReviewer` 類別：
+  - `__init__`：初始化 `anthropic.Anthropic(api_key=...)`
+  - `run_review(ctx)`：Agentic Loop（`stop_reason == "tool_use"` / `"end_turn"`）
+
+Agentic Loop 細節：
+```
+messages = [user: 初始 prompt]
+loop:
+  response = client.messages.create(model, max_tokens, tools, messages)
+  messages.append(assistant: response.content)
+  if stop_reason == "end_turn" → return text
+  if stop_reason == "tool_use":
+    for each tool_use block:
+      result = _dispatch_tool(...)
+      tool_results.append({type: "tool_result", tool_use_id, content})
+    messages.append(user: tool_results)
+```
+
+---
+
+#### Step 0-4：`app/providers/openai.py` — OpenAIReviewer
+
+- `_TOOL_SCHEMAS`：OpenAI function calling 格式（`type: "function"`, `parameters` 欄位）
+- `OpenAIReviewer` 類別：
+  - `__init__`：初始化 `openai.OpenAI(api_key=...)`
+  - `run_review(ctx)`：Agentic Loop（`finish_reason == "tool_calls"` / `"stop"`）
+
+Agentic Loop 細節（與 Anthropic 的差異）：
+```
+messages = [user: 初始 prompt]
+loop:
+  response = client.chat.completions.create(model, max_tokens, tools, messages)
+  choice = response.choices[0]
+  messages.append(choice.message)          ← 直接 append message object
+  if finish_reason == "stop" → return choice.message.content
+  if finish_reason == "tool_calls":
+    for each tool_call in choice.message.tool_calls:
+      tool_input = json.loads(tool_call.function.arguments)
+      result = _dispatch_tool(...)
+      messages.append({role: "tool", tool_call_id, content: result})
+```
+
+Tool Schema 格式對照：
+| 欄位 | Anthropic | OpenAI |
+|------|-----------|--------|
+| 頂層 | `{name, description, input_schema}` | `{type: "function", function: {name, description, parameters}}` |
+| 參數 | `input_schema` | `parameters` |
+| tool result | `{type: "tool_result", tool_use_id, content}` | `{role: "tool", tool_call_id, content}` |
+
+---
+
+#### Step 0-5：`app/ai_review.py` — 改為 Factory
+
+原有實作移至 `providers/anthropic.py`，此檔案僅保留：
+
+```python
+from app import config
+from app.providers.base import BaseReviewer
+from app.providers.anthropic import AnthropicReviewer
+from app.providers.openai import OpenAIReviewer
+from app.mr_info import MRContext
+
+def get_reviewer() -> BaseReviewer:
+    if config.AI_PROVIDER == "openai":
+        return OpenAIReviewer(config.OPENAI_API_KEY, config.AI_MODEL)
+    return AnthropicReviewer(config.ANTHROPIC_API_KEY, config.AI_MODEL)
+
+def run_review(ctx: MRContext) -> str:
+    return get_reviewer().run_review(ctx)
+```
+
+---
+
+#### Step 0-6：`app/config.py` — 新增 Provider 相關設定
+
+新增：
+```python
+AI_PROVIDER = os.getenv("AI_PROVIDER", "anthropic")   # "anthropic" | "openai"
+AI_MODEL    = os.getenv("AI_MODEL", "claude-sonnet-4-6")
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")  # optional
+OPENAI_API_KEY    = os.getenv("OPENAI_API_KEY", "")     # optional
+```
+
+注意：`ANTHROPIC_API_KEY` 從 `os.environ["..."]`（強制必填）改為 `os.getenv("...", "")`（選填）。
+
+---
+
+#### Step 0-7：`app/task_manager.py` — API Key 檢查依 Provider
+
+現有邏輯：
+```python
+if not config.ANTHROPIC_API_KEY:
+    # 發留言提示
+```
+
+改為：
+```python
+api_key = config.ANTHROPIC_API_KEY if config.AI_PROVIDER == "anthropic" else config.OPENAI_API_KEY
+if not api_key:
+    # 發留言提示（訊息帶上 provider 名稱）
+```
+
+---
+
+#### Step 0-8：`requirements.txt` — 新增 openai
+
+```
+fastapi
+uvicorn[standard]
+redis[asyncio]
+anthropic
+openai          ← 新增
+requests
+python-dotenv
+```
+
+---
+
+#### Step 0-9：`.env` — 新增環境變數
+
+新增三行：
+```
+AI_PROVIDER=anthropic
+AI_MODEL=claude-sonnet-4-6
+OPENAI_API_KEY=
+```
+
+---
+
+#### 實作完成後目錄結構
+
+```
+app/
+├── providers/
+│   ├── __init__.py
+│   ├── base.py          # BaseReviewer（介面）
+│   ├── anthropic.py     # AnthropicReviewer（實作）
+│   └── openai.py        # OpenAIReviewer（實作）
+├── ai_review.py         # factory only
+├── config.py
+├── task_manager.py
+└── ...（其餘不變）
+```
+
+---
+
 ### Step 1：環境建置
 
 建立以下基礎設施檔案：

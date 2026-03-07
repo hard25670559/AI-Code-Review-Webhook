@@ -4,6 +4,7 @@ import subprocess
 from app import config
 from app import gitlab_client
 from app.repo_manager import _run_git
+from app.mr_info import MRContext
 
 _TRUNCATE = 3000
 
@@ -101,71 +102,18 @@ def get_issue_notes(project_id: int, issue_iid: int) -> str:
         return f"錯誤：{e}"
 
 
-TOOL_SCHEMAS = [
-    {
-        "name": "get_file_diff",
-        "description": "取得該 MR 中某個特定檔案的 diff 內容，查看此檔案在本次 MR 中的完整變更。",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "file_path": {"type": "string", "description": "要查看 diff 的檔案路徑"},
-            },
-            "required": ["file_path"],
-        },
-    },
-    {
-        "name": "get_file_content",
-        "description": "取得專案中某個檔案的完整內容（source branch 的現有版本），用於查看相關實作、interface、base class 等完整上下文。",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "file_path": {"type": "string", "description": "要讀取的檔案路徑"},
-            },
-            "required": ["file_path"],
-        },
-    },
-    {
-        "name": "list_directory",
-        "description": "列出專案中某個目錄的結構，了解專案組織方式。",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "path": {"type": "string", "description": "要列出的目錄路徑，根目錄請傳空字串"},
-            },
-            "required": ["path"],
-        },
-    },
-    {
-        "name": "search_in_repo",
-        "description": "在專案中搜尋關鍵字，找出相關函數定義、類別、常數等，最多回傳 5 筆結果。",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "keyword": {"type": "string", "description": "要搜尋的關鍵字"},
-            },
-            "required": ["keyword"],
-        },
-    },
-    {
-        "name": "get_issue",
-        "description": "取得 GitLab Issue 的詳細內容（標題、描述、狀態、標籤），作為判斷 MR 是否符合需求的標準。",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "issue_iid": {"type": "integer", "description": "Issue 在該專案中的編號"},
-            },
-            "required": ["issue_iid"],
-        },
-    },
-    {
-        "name": "get_issue_notes",
-        "description": "取得 GitLab Issue 底下的留言列表，查看需求討論內容與決策背景。",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "issue_iid": {"type": "integer", "description": "Issue 在該專案中的編號"},
-            },
-            "required": ["issue_iid"],
-        },
-    },
-]
+def dispatch_tool(ctx: MRContext, tool_name: str, tool_input: dict) -> str:
+    if tool_name == "get_file_diff":
+        return get_file_diff(ctx.project_id, tool_input["file_path"], ctx.target_branch, ctx.source_branch)
+    elif tool_name == "get_file_content":
+        return get_file_content(ctx.project_id, tool_input["file_path"])
+    elif tool_name == "list_directory":
+        return list_directory(ctx.project_id, tool_input["path"])
+    elif tool_name == "search_in_repo":
+        return search_in_repo(ctx.project_id, tool_input["keyword"])
+    elif tool_name == "get_issue":
+        return get_issue(ctx.project_id, tool_input["issue_iid"])
+    elif tool_name == "get_issue_notes":
+        return get_issue_notes(ctx.project_id, tool_input["issue_iid"])
+    else:
+        return f"未知工具：{tool_name}"

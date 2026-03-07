@@ -13,14 +13,15 @@ running_tasks: dict[tuple[int, int], asyncio.Task] = {}
 async def _review_task(ctx: MRContext) -> None:
     key = (ctx.project_id, ctx.mr_iid)
     try:
-        if not config.ANTHROPIC_API_KEY:
+        api_key = config.ANTHROPIC_API_KEY if config.AI_PROVIDER == "anthropic" else config.OPENAI_API_KEY
+        if not api_key:
             await asyncio.sleep(10)
             now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             await asyncio.to_thread(
                 gitlab_client.post_mr_comment,
                 ctx.project_id,
                 ctx.mr_iid,
-                f"ANTHROPIC_API_KEY 尚未設定，時間：{now}",
+                f"{config.AI_PROVIDER.upper()}_API_KEY 尚未設定，時間：{now}",
             )
             return
 
