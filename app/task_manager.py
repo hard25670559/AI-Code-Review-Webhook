@@ -17,7 +17,9 @@ running_tasks: dict[tuple[int, int], asyncio.Task] = {}
 async def _review_task(ctx: MRContext) -> None:
     key = (ctx.project_id, ctx.mr_iid)
     try:
-        if config.AI_PROVIDER == "openai":
+        if config.AI_PROVIDER == "claude_cli":
+            api_key = "cli"
+        elif config.AI_PROVIDER == "openai":
             api_key = config.OPENAI_API_KEY
         else:
             api_key = config.ANTHROPIC_API_KEY
