@@ -32,3 +32,10 @@ def get_issue_notes(project_id: int, issue_iid: int) -> list:
     resp = requests.get(url, headers=_HEADERS, params={"sort": "asc", "per_page": 100}, verify=False)
     resp.raise_for_status()
     return resp.json()
+
+
+def get_mr_notes(project_id: int, mr_iid: int) -> list:
+    url = f"{config.GITLAB_URL}/api/v4/projects/{project_id}/merge_requests/{mr_iid}/notes"
+    resp = requests.get(url, headers=_HEADERS, params={"sort": "desc", "per_page": 100}, verify=False)
+    resp.raise_for_status()
+    return resp.json()

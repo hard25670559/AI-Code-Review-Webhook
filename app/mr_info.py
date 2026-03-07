@@ -17,6 +17,7 @@ class MRContext:
     repo_url: str
     repo_path: str
     changed_files: list[str]
+    last_reviewed_sha: str | None = None
 
 
 async def build_mr_context(payload: dict) -> MRContext:

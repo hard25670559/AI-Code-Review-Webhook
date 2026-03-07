@@ -102,6 +102,27 @@ def get_issue_notes(project_id: int, issue_iid: int) -> str:
         return f"錯誤：{e}"
 
 
+def get_diff_between_shas(ctx: MRContext, from_sha: str, to_sha: str) -> str:
+    repo_path = os.path.join(config.REPO_BASE_PATH, str(ctx.project_id))
+    try:
+        output = _run_git(["diff", f"{from_sha}...{to_sha}"], cwd=repo_path)
+        return _truncate(output) if output else "（無差異）"
+    except subprocess.CalledProcessError as e:
+        return f"錯誤：{e.stderr}"
+
+
+def get_previous_review(ctx: MRContext) -> str:
+    try:
+        notes = gitlab_client.get_mr_notes(ctx.project_id, ctx.mr_iid)
+        for note in notes:
+            body = note.get("body", "")
+            if body.startswith("## AI Code Review（"):
+                return _truncate(body)
+        return "（找不到過去的 review 記錄）"
+    except Exception as e:
+        return f"錯誤：{e}"
+
+
 def dispatch_tool(ctx: MRContext, tool_name: str, tool_input: dict) -> str:
     if tool_name == "get_file_diff":
         return get_file_diff(ctx.project_id, tool_input["file_path"], ctx.target_branch, ctx.source_branch)
@@ -115,5 +136,9 @@ def dispatch_tool(ctx: MRContext, tool_name: str, tool_input: dict) -> str:
         return get_issue(ctx.project_id, tool_input["issue_iid"])
     elif tool_name == "get_issue_notes":
         return get_issue_notes(ctx.project_id, tool_input["issue_iid"])
+    elif tool_name == "get_diff_between_shas":
+        return get_diff_between_shas(ctx, tool_input["from_sha"], tool_input["to_sha"])
+    elif tool_name == "get_previous_review":
+        return get_previous_review(ctx)
     else:
         return f"未知工具：{tool_name}"

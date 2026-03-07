@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 def _build_initial_prompt(ctx: MRContext) -> str:
     file_list = "\n".join(ctx.changed_files) if ctx.changed_files else "（無變動檔案）"
     description = ctx.description.strip() if ctx.description else "（無描述）"
-    return (
+    base = (
         f"以下是一個 GitLab Merge Request 的資訊，請進行 code review：\n\n"
         f"標題：{ctx.title}\n"
         f"作者：{ctx.author}\n"
@@ -21,8 +21,17 @@ def _build_initial_prompt(ctx: MRContext) -> str:
         f"Source Branch：{ctx.source_branch}\n\n"
         f"MR 描述：\n{description}\n\n"
         f"變動檔案列表：\n{file_list}\n\n"
-        f"請主動使用工具查看需要的檔案 diff 與相關內容，完成後提供詳細的 code review 建議。"
     )
+    if ctx.last_reviewed_sha:
+        return (
+            base
+            + f"此 MR 先前已有過 AI review（SHA：{ctx.last_reviewed_sha[:7]}）。\n"
+            f"本次只需針對 {ctx.last_reviewed_sha[:7]} → {ctx.sha[:7]} 之間的新增變更進行補充 review。\n"
+            f"請使用 get_diff_between_shas 工具取得差異內容。\n"
+            f"如有需要，可使用 get_previous_review 工具查看上次的 review 結論作為參考。\n"
+            f"完成後提供針對新增變更的 code review 建議。"
+        )
+    return base + "請主動使用工具查看需要的檔案 diff 與相關內容，完成後提供詳細的 code review 建議。"
 
 
 _TOOL_SCHEMAS = [
@@ -107,6 +116,33 @@ _TOOL_SCHEMAS = [
                     "issue_iid": {"type": "integer", "description": "Issue 在該專案中的編號"},
                 },
                 "required": ["issue_iid"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_diff_between_shas",
+            "description": "取得兩個 commit SHA 之間的 diff，用於查看自上次 review 後新增的變更。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "from_sha": {"type": "string", "description": "起始 SHA（上次 review 的 SHA）"},
+                    "to_sha": {"type": "string", "description": "結束 SHA（目前最新的 SHA）"},
+                },
+                "required": ["from_sha", "to_sha"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_previous_review",
+            "description": "取得此 MR 上一次 AI review 的留言內容，作為理解新 diff 的背景參考。若覺得對理解新變更有幫助才需呼叫。",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": [],
             },
         },
     },

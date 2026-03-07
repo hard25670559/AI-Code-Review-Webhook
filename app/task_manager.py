@@ -9,6 +9,8 @@ from app import ai_review, gitlab_client, redis_client, config
 
 logger = logging.getLogger(__name__)
 
+_AI_REVIEW_PREFIX = "## AI Code Review（"
+
 running_tasks: dict[tuple[int, int], asyncio.Task] = {}
 
 
@@ -26,6 +28,16 @@ async def _review_task(ctx: MRContext) -> None:
                 f"{config.AI_PROVIDER.upper()}_API_KEY 尚未設定，時間：{now}",
             )
             return
+
+        last_sha = await redis_client.get_processed_sha(ctx.project_id, ctx.mr_iid)
+        if last_sha:
+            notes = await asyncio.to_thread(gitlab_client.get_mr_notes, ctx.project_id, ctx.mr_iid)
+            has_ai_review = any(n.get("body", "").startswith(_AI_REVIEW_PREFIX) for n in notes)
+            if has_ai_review:
+                ctx.last_reviewed_sha = last_sha
+                logger.info("Incremental review mode for MR %s/%s (base: %s)", ctx.project_id, ctx.mr_iid, last_sha[:7])
+            else:
+                logger.info("AI review comment not found, falling back to full review for MR %s/%s", ctx.project_id, ctx.mr_iid)
 
         review_text = await asyncio.to_thread(ai_review.run_review, ctx)
 
