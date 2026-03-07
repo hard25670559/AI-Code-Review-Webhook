@@ -1,0 +1,6 @@
+fastapi
+uvicorn[standard]
+redis[asyncio]
+anthropic
+requests
+python-dotenv
