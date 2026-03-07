@@ -1,8 +1,12 @@
+import logging
+
 import anthropic
 
 from app.mr_info import MRContext
 from app.providers.base import BaseReviewer
 from app import tools
+
+logger = logging.getLogger(__name__)
 
 
 def _build_initial_prompt(ctx: MRContext) -> str:
@@ -96,7 +100,9 @@ class AnthropicReviewer(BaseReviewer):
         self._model = model
 
     def run_review(self, ctx: MRContext) -> str:
+        logger.info("[anthropic/%s] Starting review for MR %s/%s (%s)", self._model, ctx.project_id, ctx.mr_iid, ctx.sha[:7])
         messages = [{"role": "user", "content": _build_initial_prompt(ctx)}]
+        tool_call_count = 0
 
         while True:
             response = self._client.messages.create(
@@ -111,6 +117,7 @@ class AnthropicReviewer(BaseReviewer):
             if response.stop_reason == "end_turn":
                 for block in response.content:
                     if hasattr(block, "text"):
+                        logger.info("[anthropic/%s] Review complete: %d tool calls, %d chars", self._model, tool_call_count, len(block.text))
                         return block.text
                 return ""
 
@@ -118,6 +125,8 @@ class AnthropicReviewer(BaseReviewer):
                 tool_results = []
                 for block in response.content:
                     if block.type == "tool_use":
+                        logger.info("Tool call: %s(%s)", block.name, ", ".join(f"{k}={v!r}" for k, v in block.input.items()))
+                        tool_call_count += 1
                         result = tools.dispatch_tool(ctx, block.name, block.input)
                         tool_results.append({
                             "type": "tool_result",

@@ -1,6 +1,8 @@
 import asyncio
 import logging
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
+
+_TZ_TAIPEI = timezone(timedelta(hours=8))
 
 from app.mr_info import MRContext
 from app import ai_review, gitlab_client, redis_client, config
@@ -16,7 +18,7 @@ async def _review_task(ctx: MRContext) -> None:
         api_key = config.ANTHROPIC_API_KEY if config.AI_PROVIDER == "anthropic" else config.OPENAI_API_KEY
         if not api_key:
             await asyncio.sleep(10)
-            now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            now = datetime.now(_TZ_TAIPEI).strftime("%Y-%m-%d %H:%M:%S")
             await asyncio.to_thread(
                 gitlab_client.post_mr_comment,
                 ctx.project_id,

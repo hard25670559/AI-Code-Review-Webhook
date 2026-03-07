@@ -1,10 +1,13 @@
 import json
+import logging
 
 import openai
 
 from app.mr_info import MRContext
 from app.providers.base import BaseReviewer
 from app import tools
+
+logger = logging.getLogger(__name__)
 
 
 def _build_initial_prompt(ctx: MRContext) -> str:
@@ -116,7 +119,9 @@ class OpenAIReviewer(BaseReviewer):
         self._model = model
 
     def run_review(self, ctx: MRContext) -> str:
+        logger.info("[openai/%s] Starting review for MR %s/%s (%s)", self._model, ctx.project_id, ctx.mr_iid, ctx.sha[:7])
         messages = [{"role": "user", "content": _build_initial_prompt(ctx)}]
+        tool_call_count = 0
 
         while True:
             response = self._client.chat.completions.create(
@@ -130,11 +135,15 @@ class OpenAIReviewer(BaseReviewer):
             messages.append(choice.message)
 
             if choice.finish_reason == "stop":
-                return choice.message.content or ""
+                content = choice.message.content or ""
+                logger.info("[openai/%s] Review complete: %d tool calls, %d chars", self._model, tool_call_count, len(content))
+                return content
 
             if choice.finish_reason == "tool_calls":
                 for tool_call in choice.message.tool_calls:
                     tool_input = json.loads(tool_call.function.arguments)
+                    logger.info("Tool call: %s(%s)", tool_call.function.name, ", ".join(f"{k}={v!r}" for k, v in tool_input.items()))
+                    tool_call_count += 1
                     result = tools.dispatch_tool(ctx, tool_call.function.name, tool_input)
                     messages.append({
                         "role": "tool",
