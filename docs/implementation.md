@@ -826,6 +826,8 @@ COPY app/ ./app/
 
 # 建立 /data/repos 目錄並設定 owner（volume 掛載後 appuser 有寫入權限）
 RUN mkdir -p /data/repos && chown appuser:appuser /data/repos
+# 預先建立 .claude 目錄並設定 owner（避免 Docker 掛載 claude_data volume 時自動建立，導致 owner 為 root）
+RUN mkdir -p /home/appuser/.claude && chown appuser:appuser /home/appuser/.claude
 
 USER appuser
 
@@ -835,6 +837,7 @@ CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
 說明：
 - `useradd -m -u 1000 appuser`：建立 home 目錄（`/home/appuser/`），Claude CLI session 存放於此
 - `chown appuser:appuser /data/repos`：需在切換使用者前設定，否則無權限
+- `mkdir -p /home/appuser/.claude && chown appuser:appuser /home/appuser/.claude`：預先建立目錄，確保 `claude_data` volume 掛載後 appuser 有寫入權限；若不預建，Docker 會以 root 建立該目錄，導致 appuser 無法寫入 session 檔案
 - `USER appuser`：之後所有指令（含 CMD）均以 appuser 執行
 
 ---

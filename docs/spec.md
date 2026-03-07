@@ -479,6 +479,7 @@ MCP config 結構（傳給 `--mcp-config`）：
 - `Dockerfile` 建立非 root 使用者 `appuser`（UID 1000）：
   - `--dangerously-skip-permissions` 基於安全考量禁止在 root 下執行，必須以非 root 身份執行 Claude CLI
   - 建立 `/data/repos` 目錄並設定 owner 為 `appuser`（確保 volume 掛載後有寫入權限）
+  - 建立 `/home/appuser/.claude` 目錄並設定 owner 為 `appuser`（確保 `claude_data` volume 掛載後 appuser 有寫入權限，避免 Docker 自動建立時 owner 為 root）
   - 最後以 `USER appuser` 切換，uvicorn 和 Claude CLI 均以此身份執行
 - `docker-compose.yml` 新增 `claude_data` volume，掛載到 `/home/appuser/.claude`：
   - 持久化 Claude CLI 的 session 與設定（`claude login` 認證結果）
@@ -503,7 +504,7 @@ app/
 - [ ] `app/task_manager.py`：review 前讀取 `session_id` 填入 ctx；review 後將 `ctx.cli_session_id` 存回 Redis（僅 `claude_cli` provider）
 - [ ] `app/webhook.py`：新增 `action == "merge"` 處理，清除 `cli_session_id`
 - [ ] `Dockerfile`：安裝 Node.js + `npm install -g @anthropic-ai/claude-code`
-- [ ] `Dockerfile`：建立非 root 使用者 `appuser`（UID 1000），設定 `/data/repos` owner，`USER appuser`
+- [ ] `Dockerfile`：建立非 root 使用者 `appuser`（UID 1000），設定 `/data/repos` 與 `/home/appuser/.claude` owner，`USER appuser`
 - [ ] `Dockerfile`：以 `appuser` 身份設定 `git config --global --add safe.directory '*'`，解決 volume-mounted repo 的 "dubious ownership" 錯誤（git 安全限制：目錄 owner 與執行者不符時拒絕操作）
 - [ ] `docker-compose.yml`：新增 `claude_data` volume，掛載到 `/home/appuser/.claude`
 - [ ] `requirements.txt`：新增 `fastmcp`
