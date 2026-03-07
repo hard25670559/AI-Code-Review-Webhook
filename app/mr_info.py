@@ -17,6 +17,8 @@ class MRContext:
     repo_url: str
     repo_path: str
     changed_files: list[str]
+    last_reviewed_sha: str | None = None
+    cli_session_id: str | None = None
 
 
 async def build_mr_context(payload: dict) -> MRContext:
@@ -36,7 +38,7 @@ async def build_mr_context(payload: dict) -> MRContext:
 
     raw = await asyncio.to_thread(
         _run_git,
-        ["diff", "--name-only", f"{target_branch}...{source_branch}"],
+        ["diff", "--name-only", f"origin/{target_branch}...origin/{source_branch}"],
         repo_path,
     )
     changed_files = [f for f in raw.strip().splitlines() if f]

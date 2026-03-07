@@ -249,6 +249,313 @@ GitLab MR 留言
 
 ---
 
+## 功能 4.5：AI Provider 切換機制
+
+### 需求描述
+- 支援多個 AI 廠商（Anthropic、OpenAI），可透過環境變數切換
+- 切換廠商或模型不需修改程式碼，只需改 `.env` 重啟
+- 每個 Provider 的 Agentic Loop 實作細節各自封裝，主流程不感知差異
+
+### 技術規格
+
+#### 介面定義（`app/providers/base.py`）
+```python
+from abc import ABC, abstractmethod
+from app.mr_info import MRContext
+
+class BaseReviewer(ABC):
+    @abstractmethod
+    def run_review(self, ctx: MRContext) -> str: ...
+```
+
+#### Provider 實作
+| 類別 | 檔案 | 對應廠商 |
+|------|------|---------|
+| `AnthropicReviewer` | `app/providers/anthropic.py` | Anthropic Claude |
+| `OpenAIReviewer` | `app/providers/openai.py` | OpenAI GPT |
+| `ClaudeCliReviewer` | `app/providers/claude_cli.py` | Claude CLI（本機） |
+
+每個實作類別負責：
+- 初始化對應的 SDK client
+- 定義自己格式的 Tool Schemas（Anthropic / OpenAI 格式不同）
+- 實作完整的 Agentic Loop（含工具呼叫與結果回饋）
+
+#### Factory（`app/ai_review.py`）
+```python
+def get_reviewer() -> BaseReviewer: ...  # 依 config.AI_PROVIDER 回傳對應實作
+def run_review(ctx: MRContext) -> str: ...  # 委派給 get_reviewer()
+```
+
+### 環境變數
+
+| 變數名稱 | 說明 | 可選值 | 預設值 |
+|----------|------|--------|--------|
+| `AI_PROVIDER` | 使用的 AI 廠商 | `anthropic`、`openai`、`claude_cli` | `anthropic` |
+| `AI_MODEL` | 使用的模型名稱 | 各廠商模型 ID | `claude-sonnet-4-6` |
+| `ANTHROPIC_API_KEY` | Anthropic API Key | - | （選填，依 provider） |
+| `OPENAI_API_KEY` | OpenAI API Key | - | （選填，依 provider） |
+
+> 啟動時若 `AI_PROVIDER` 對應的 API Key 未設定，留言提示並等待（現有行為延伸）
+
+### Tool Schema 格式差異
+
+| 欄位 | Anthropic | OpenAI |
+|------|-----------|--------|
+| 頂層結構 | `{name, description, input_schema}` | `{type: "function", function: {name, description, parameters}}` |
+| 參數欄位名稱 | `input_schema` | `parameters` |
+| tool result 格式 | `{type: "tool_result", tool_use_id, content}` | `{role: "tool", tool_call_id, content}` |
+| stop 條件 | `stop_reason == "end_turn"` | `finish_reason == "stop"` |
+| 工具呼叫條件 | `stop_reason == "tool_use"` | `finish_reason == "tool_calls"` |
+
+各 Provider 自行維護自己格式的 Tool Schemas，不共用。
+
+### 檔案結構異動
+
+```
+app/
+├── providers/
+│   ├── __init__.py
+│   ├── base.py          # BaseReviewer 抽象介面
+│   ├── anthropic.py     # AnthropicReviewer（原 ai_review.py 的實作搬移）
+│   └── openai.py        # OpenAIReviewer
+└── ai_review.py         # 僅保留 factory + run_review() 委派
+```
+
+### 實作細項
+- [ ] `app/providers/base.py`：定義 `BaseReviewer` 抽象類別
+- [ ] `app/providers/anthropic.py`：`AnthropicReviewer` 實作（含 Anthropic 格式 Tool Schemas + Agentic Loop）
+- [ ] `app/providers/openai.py`：`OpenAIReviewer` 實作（含 OpenAI 格式 Tool Schemas + Agentic Loop）
+- [ ] `app/ai_review.py`：改為 factory，依 `AI_PROVIDER` 回傳對應 reviewer
+- [ ] `app/config.py`：新增 `AI_PROVIDER`、`AI_MODEL`、`OPENAI_API_KEY`，`ANTHROPIC_API_KEY` 改為 optional
+- [ ] `app/task_manager.py`：API key 檢查依 `AI_PROVIDER` 決定檢查哪個 key
+- [ ] `requirements.txt`：新增 `openai`
+
+---
+
+## 功能 4.6：差異化 MR Review
+
+### 需求描述
+- 若同一個 MR 已有過 AI review，後續新 push 只針對「上次 review 的 SHA → 最新 SHA」之間的差異做 review
+- 節省 token，避免重複 review 已審過的內容
+- 若沒有過 review 記錄，維持現有完整 review 行為
+
+### 判斷邏輯
+
+```
+觸發 review 時：
+  1. 從 Redis 取得 last_reviewed_sha
+     └── 無記錄 → 執行完整 review（現有行為）
+  2. 從 GitLab MR comments 確認是否有 AI review 留言
+     └── 無留言（被刪除）→ 退回完整 review
+  3. 兩者皆有 → 執行差異 review
+```
+
+### 差異 review 流程
+1. 帶入差異模式的 prompt（告知 AI 這是補充 review，提供 last SHA 與 current SHA）
+2. AI 使用 `get_diff_between_shas` 工具取得差異 diff
+3. AI 可選擇性呼叫 `get_previous_review` 工具取得舊 review 內容作為參考
+4. AI 完成後以相同格式留言（`## AI Code Review（{sha[:7]}）`）
+
+### 技術規格
+
+#### 識別 AI review 留言
+- Pattern：留言內容以 `## AI Code Review（` 開頭
+- 來源：GitLab API `GET /api/v4/projects/:id/merge_requests/:mr_iid/notes`
+
+#### 新增工具
+
+##### `get_diff_between_shas`
+- 描述：取得兩個 SHA 之間的 diff，用於查看自上次 review 後新增的變更
+- 參數：`from_sha`（字串）、`to_sha`（字串）
+- 實作：`git diff {from_sha}...{to_sha}`（在 local repo 執行）
+
+##### `get_previous_review`
+- 描述：取得此 MR 上一次 AI review 的留言內容，作為理解新 diff 的背景參考
+- 參數：無
+- 實作：呼叫 GitLab API 取得 MR notes，篩選最新一筆 `## AI Code Review（` 開頭的留言
+- 回傳：最新一筆 AI review 留言全文（限制 3000 字元）
+- 注意：由 AI 自行決定是否呼叫，不強制
+
+### 邊界情況
+- Redis 有 SHA 但 GitLab 找不到 AI review 留言（被刪除）→ 退回完整 review
+- from_sha 與 to_sha 相同（無新差異）→ 不觸發 review（SHA 去重機制已處理）
+
+### 實作細項
+- [ ] `gitlab_client.py`：新增 `get_mr_notes(project_id, mr_iid)` 函式
+- [ ] `tools.py`：新增 `get_diff_between_shas(ctx, from_sha, to_sha)` 工具函式
+- [ ] `tools.py`：新增 `get_previous_review(ctx)` 工具函式
+- [ ] `app/providers/anthropic.py`：新增兩個工具的 Schema（Anthropic 格式）
+- [ ] `app/providers/openai.py`：新增兩個工具的 Schema（OpenAI 格式）
+- [ ] `ai_review.py` 或 `task_manager.py`：新增判斷邏輯，依有無舊 review 決定 prompt 模式
+- [ ] 差異模式 prompt：告知 AI 這是針對新增差異的補充 review，提供 last SHA 與 current SHA
+
+---
+
+## 功能 4.7：Claude CLI Provider
+
+### 需求描述
+- 新增第三個 AI Provider，使用本機安裝的 `claude` CLI（Claude Code）執行 review
+- 透過 Redis 儲存 `session_id`，同一 MR 的多次 review 共用同一個 Claude 對話 session，保持跨次呼叫的上下文一致性
+- MR merge 時清除 session_id，避免殘留舊 session
+
+### 技術規格
+
+#### ClaudeCliReviewer（`app/providers/claude_cli.py`）
+
+呼叫方式：
+```bash
+claude -p "<prompt>" \
+  --output-format json \
+  --mcp-config '<mcp_config_json>' \
+  --dangerously-skip-permissions \
+  [--resume <session_id>]
+```
+
+- **Prompt**：與 Anthropic/OpenAI provider 相同邏輯（MR 基本資訊 + 變動檔案列表），AI 自行決定呼叫哪些工具
+- **工具**：透過 MCP server 提供（stdio 模式），工具集與現有 provider 相同
+- **Session 延續**：若 Redis 有此 MR 的 `session_id`，加上 `--resume <session_id>` 參數
+- **輸出解析**：解析 JSON stdout，`result` 欄位為 review 文字，`session_id` 欄位存回 Redis
+- **實作位置**：`ctx.cli_session_id` 欄位（MRContext 新增）用於傳遞 session_id 進出 reviewer
+
+#### MCP Server（`app/mcp_server.py`）
+
+- 使用 `fastmcp` 建立 stdio MCP server
+- 暴露以下工具（與現有 `tools.py` 共用實作）：
+  - `get_file_diff`、`get_file_content`、`list_directory`、`search_in_repo`
+  - `get_issue`、`get_issue_notes`
+  - `get_diff_between_shas`、`get_previous_review`
+- MRContext 資訊（`project_id`、`mr_iid`、`sha`、`target_branch`、`source_branch`）透過環境變數傳入
+- 由 Claude CLI 在需要工具時自動 spawn（stdio transport），每次 review 結束後自動結束
+
+MCP config 結構（傳給 `--mcp-config`）：
+```json
+{
+  "mcpServers": {
+    "ai-review": {
+      "command": "python",
+      "args": ["-m", "app.mcp_server"],
+      "env": {
+        "MR_PROJECT_ID": "123",
+        "MR_IID": "45",
+        "MR_SHA": "abc1234...",
+        "MR_TARGET_BRANCH": "main",
+        "MR_SOURCE_BRANCH": "feature/xxx",
+        "MR_LAST_REVIEWED_SHA": ""
+      }
+    }
+  }
+}
+```
+
+#### Session 管理
+
+| 項目 | 說明 |
+|------|------|
+| Redis Key | `ai_review:session:{project_id}:{mr_iid}` |
+| Value | Claude CLI 回傳的 `session_id`（UUID 字串） |
+| TTL | 永不過期 |
+| 寫入時機 | 每次 review 完成後，從 `ctx.cli_session_id` 存入 Redis |
+| 讀取時機 | 每次 review 開始前，從 Redis 取出填入 `ctx.cli_session_id` |
+| 清除時機 | MR merge 事件觸發時 |
+
+#### MR Merge 處理
+
+- webhook 收到 `action == "merge"` 事件時：
+  1. 刪除 Redis 中的 `ai_review:session:{project_id}:{mr_iid}`
+  2. 不觸發 review，直接回應 `{"status": "ok"}`
+- webhook.py 的 `_ALLOWED_ACTIONS` 不包含 `merge`，需另外處理
+
+### 環境變數
+
+| 變數名稱 | 說明 |
+|----------|------|
+| `AI_PROVIDER=claude_cli` | 指定使用 Claude CLI provider |
+| `ANTHROPIC_API_KEY` | Claude CLI 認證使用（與 Anthropic provider 共用） |
+
+### 容器化
+
+- `Dockerfile` 新增 Node.js 安裝與 `npm install -g @anthropic-ai/claude-code`
+- `requirements.txt` 新增 `fastmcp`
+- `Dockerfile` 建立非 root 使用者 `appuser`（UID 1000）：
+  - `--dangerously-skip-permissions` 基於安全考量禁止在 root 下執行，必須以非 root 身份執行 Claude CLI
+  - 建立 `/data/repos` 目錄並設定 owner 為 `appuser`（確保 volume 掛載後有寫入權限）
+  - 建立 `/home/appuser/.claude` 目錄並設定 owner 為 `appuser`（確保 `claude_data` volume 掛載後 appuser 有寫入權限，避免 Docker 自動建立時 owner 為 root）
+  - 最後以 `USER appuser` 切換，uvicorn 和 Claude CLI 均以此身份執行
+- `docker-compose.yml` 新增 `claude_data` volume，掛載到 `/home/appuser/.claude`：
+  - 持久化 Claude CLI 的 session 與設定（`claude login` 認證結果）
+  - 允許使用 Claude.ai 訂閱方案（`claude login`）取代 API key 計費
+  - 登入方式：`docker exec -it <container> claude login`
+
+### 檔案結構異動
+
+```
+app/
+├── providers/
+│   └── claude_cli.py     # ClaudeCliReviewer
+└── mcp_server.py          # FastMCP stdio server（暴露工具給 Claude CLI）
+```
+
+### 實作細項
+- [ ] `app/mr_info.py`：`MRContext` 新增 `cli_session_id: str | None = None` 欄位
+- [ ] `app/redis_client.py`：新增 `get_session_id`、`set_session_id`、`delete_session_id` 函式
+- [ ] `app/mcp_server.py`：建立 FastMCP stdio server，透過環境變數接收 MRContext，暴露所有工具
+- [ ] `app/providers/claude_cli.py`：`ClaudeCliReviewer` 實作（含 MCP config 組裝、subprocess 呼叫、JSON 解析、session_id 更新）
+- [ ] `app/ai_review.py`：factory 新增 `claude_cli` case
+- [ ] `app/task_manager.py`：review 前讀取 `session_id` 填入 ctx；review 後將 `ctx.cli_session_id` 存回 Redis（僅 `claude_cli` provider）
+- [ ] `app/webhook.py`：新增 `action == "merge"` 處理，清除 `cli_session_id`
+- [ ] `Dockerfile`：安裝 Node.js + `npm install -g @anthropic-ai/claude-code`
+- [ ] `Dockerfile`：建立非 root 使用者 `appuser`（UID 1000），設定 `/data/repos` 與 `/home/appuser/.claude` owner，`USER appuser`
+- [ ] `Dockerfile`：以 `appuser` 身份設定 `git config --global --add safe.directory '*'`，解決 volume-mounted repo 的 "dubious ownership" 錯誤（git 安全限制：目錄 owner 與執行者不符時拒絕操作）
+- [ ] `docker-compose.yml`：新增 `claude_data` volume，掛載到 `/home/appuser/.claude`
+- [ ] `requirements.txt`：新增 `fastmcp`
+- [ ] `.env.example`：新增 `AI_PROVIDER=claude_cli` 範例說明
+
+---
+
+## 功能 4.8：Health Check — Claude CLI 健康診斷
+
+### 需求描述
+- 擴充 `GET /health` endpoint，測試 Claude CLI 是否可正常運作
+- 發送簡單的 "say hi" prompt，確認 Claude CLI 有正確回應
+- 方便快速診斷 Claude CLI 安裝與 API Key 設定是否正確
+
+### 技術規格
+- 端點：`GET /health`
+- 僅在 `AI_PROVIDER=claude_cli` 時執行 Claude CLI 測試；其他 provider 維持原有行為（只回傳 `{"status": "ok"}`）
+- 執行指令：`claude -p "say hi" --output-format json --dangerously-skip-permissions`
+- 使用 `asyncio.to_thread` 包裝 subprocess 呼叫（避免 blocking async event loop）
+
+### 回傳格式
+
+成功：
+```json
+{
+  "status": "ok",
+  "claude_cli": {
+    "status": "ok",
+    "response": "Hello! ..."
+  }
+}
+```
+
+失敗：
+```json
+{
+  "status": "ok",
+  "claude_cli": {
+    "status": "error",
+    "error": "..."
+  }
+}
+```
+
+### 實作細項
+- [ ] `app/main.py`：擴充 `/health` endpoint，依 `AI_PROVIDER` 決定是否執行 Claude CLI 測試
+- [ ] 以 `asyncio.to_thread` 執行 subprocess（非阻塞）
+- [ ] 解析 JSON 輸出，取 `result` 欄位；解析失敗時回傳原始輸出截斷錯誤訊息
+
+---
+
 ## 功能 5：MR 留言
 
 ### 需求描述
@@ -309,6 +616,7 @@ GitLab MR 留言
 | 發佈 MR 留言 | `POST` | `/api/v4/projects/:id/merge_requests/:mr_iid/notes` |
 | 取得 Issue 內容 | `GET` | `/api/v4/projects/:id/issues/:issue_iid` |
 | 取得 Issue 留言 | `GET` | `/api/v4/projects/:id/issues/:issue_iid/notes` |
+| 取得 MR 留言 | `GET` | `/api/v4/projects/:id/merge_requests/:mr_iid/notes` |
 
 **禁止呼叫的操作（程式碼層面不實作）：**
 - 任何 `PUT` / `PATCH` / `DELETE` 端點
@@ -364,3 +672,5 @@ GitLab MR 留言
 | 2026-03-07 | 功能 4 新增 `get_issue` 工具，允許 Claude 查看 GitLab Issue 內容作為 code review 判斷標準；更新操作範圍限制 |
 | 2026-03-07 | 功能 4 新增 `get_issue_notes` 工具，允許 Claude 查看 Issue 留言補充需求細節 |
 | 2026-03-07 | 功能 3 初始 prompt 新增 MR 基本資訊（標題、描述、作者）；資訊來源為 webhook payload，不需額外 API 呼叫 |
+| 2026-03-07 | 新增功能 4.6：差異化 MR Review；新增 get_diff_between_shas、get_previous_review 工具；舊 review 留言識別機制；邊界情況處理 |
+| 2026-03-08 | 新增功能 4.7：Claude CLI Provider；MCP server 暴露工具；Redis session_id 管理；MR merge 清除 session；Dockerfile 新增 Node.js + Claude CLI |

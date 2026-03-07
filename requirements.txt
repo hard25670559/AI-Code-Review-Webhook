@@ -2,5 +2,7 @@ fastapi
 uvicorn[standard]
 redis[asyncio]
 anthropic
+openai
 requests
 python-dotenv
+fastmcp

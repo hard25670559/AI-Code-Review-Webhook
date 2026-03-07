@@ -7,14 +7,20 @@ services:
       - .env
     volumes:
       - repos:/data/repos
+      - claude_data:/home/appuser/.claude
+    extra_hosts:
+      - "gitlab-for-webhook:192.168.215.2"
     depends_on:
       - redis
 
   redis:
     image: redis:7-alpine
+    ports:
+      - "6379:6379"
     volumes:
       - redis_data:/data
 
 volumes:
   repos:
   redis_data:
+  claude_data:

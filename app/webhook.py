@@ -1,4 +1,5 @@
 import logging
+import subprocess
 
 from fastapi import APIRouter, HTTPException, Request, BackgroundTasks
 
@@ -23,6 +24,14 @@ async def handle_webhook(request: Request, background_tasks: BackgroundTasks):
         return {"status": "ignored", "reason": "not a merge_request event"}
 
     action = payload.get("object_attributes", {}).get("action", "")
+
+    if action == "merge":
+        project_id = payload["project"]["id"]
+        mr_iid = payload["object_attributes"]["iid"]
+        await redis_client.delete_session_id(project_id, mr_iid)
+        logger.info("Cleared CLI session for merged MR %s/%s", project_id, mr_iid)
+        return {"status": "ok", "reason": "session cleared on merge"}
+
     if action not in _ALLOWED_ACTIONS:
         return {"status": "ignored", "reason": f"action '{action}' not handled"}
 
@@ -43,5 +52,7 @@ async def _process_mr(payload: dict) -> None:
     try:
         ctx = await build_mr_context(payload)
         task_manager.submit_review_task(ctx)
+    except subprocess.CalledProcessError as e:
+        logger.error("Git command failed: %s\nstderr: %s", " ".join(e.cmd), e.stderr)
     except Exception:
         logger.exception("Failed to process MR payload")
