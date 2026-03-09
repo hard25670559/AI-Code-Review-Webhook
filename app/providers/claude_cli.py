@@ -27,9 +27,10 @@ def _build_initial_prompt(ctx: MRContext) -> str:
             f"本次只需針對 {ctx.last_reviewed_sha[:7]} → {ctx.sha[:7]} 之間的新增變更進行補充 review。\n"
             f"請使用 get_diff_between_shas 工具取得差異內容。\n"
             f"如有需要，可使用 get_previous_review 工具查看上次的 review 結論作為參考。\n"
-            f"完成後提供針對新增變更的 code review 建議。"
+            f"完成後提供針對新增變更的 code review 建議。\n\n"
+            f"請以繁體中文（台灣用詞）撰寫 review 內容。"
         )
-    return base + "請主動使用工具查看需要的檔案 diff 與相關內容，完成後提供詳細的 code review 建議。"
+    return base + "請主動使用工具查看需要的檔案 diff 與相關內容，完成後提供詳細的 code review 建議。\n\n請以繁體中文（台灣用詞）撰寫 review 內容。"
 
 
 def _build_mcp_config(ctx: MRContext) -> str:
