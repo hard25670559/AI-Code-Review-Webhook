@@ -35,6 +35,14 @@ async def handle_webhook(request: Request, background_tasks: BackgroundTasks):
     if action not in _ALLOWED_ACTIONS:
         return {"status": "ignored", "reason": f"action '{action}' not handled"}
 
+    obj_attrs = payload.get("object_attributes", {})
+    is_draft = obj_attrs.get("work_in_progress", False) or obj_attrs.get("draft", False)
+    if is_draft:
+        project_id = payload["project"]["id"]
+        mr_iid = obj_attrs.get("iid")
+        logger.info("MR %s/%s is a Draft, skipping AI review", project_id, mr_iid)
+        return {"status": "ignored", "reason": "draft MR skipped"}
+
     sha = payload["object_attributes"]["last_commit"]["id"]
     project_id = payload["project"]["id"]
     mr_iid = payload["object_attributes"]["iid"]
